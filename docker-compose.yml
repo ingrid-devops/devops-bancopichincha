@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  devops-microservice:
+    build: .
+    container_name: devops-microservice
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=development
+      - JWT_SECRET=dev-secret-change-in-production
+    volumes:
+      - ./src:/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Servicio para pruebas (opcional)
+  test:
+    build: .
+    container_name: devops-test
+    command: pytest tests/ -v
+    volumes:
+      - ./src:/app
+    depends_on:
+      - devops-microservice

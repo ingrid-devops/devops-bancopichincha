@@ -1,0 +1,157 @@
+name: CI/CD Pipeline - DevOps Exercise
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Ejecución manual
+
+env:
+  IMAGE_NAME: devops-microservice
+  REGISTRY: ghcr.io  # GitHub Container Registry
+
+jobs:
+  test:
+    name: Test and Code Quality
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        cd src
+        pip install -r requirements.txt
+        pip install pytest-cov flake8 black
+    
+    - name: Run static code analysis (flake8)
+      run: |
+        cd src
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    
+    - name: Check code formatting (black)
+      run: |
+        cd src
+        black --check --diff .
+    
+    - name: Run unit tests with coverage
+      run: |
+        cd src
+        pytest tests/ --cov=app --cov-report=xml --cov-report=html --junitxml=test-results.xml
+    
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results
+        path: src/test-results.xml
+    
+    - name: Upload coverage report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: coverage-report
+        path: src/htmlcov/
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./src/coverage.xml
+        flags: unittests
+
+  build-and-push:
+    name: Build and Push Docker Image
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Extract metadata for Docker
+      id: meta
+      uses: docker/metadata-action@v4
+      with:
+        images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=sha,prefix={{branch}}-
+    
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+    
+    - name: Verify Docker image
+      run: |
+        docker pull ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:main
+        docker images
+
+  deploy:
+    name: Deploy to Kubernetes
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+    
+    - name: Configure Kubernetes
+      run: |
+        mkdir -p $HOME/.kube
+        echo "${{ secrets.KUBECONFIG }}" | base64 --decode > $HOME/.kube/config
+    
+    - name: Deploy to Kubernetes
+      run: |
+        kubectl apply -f kubernetes/
+        kubectl rollout status deployment/devops-microservice --timeout=300s
+    
+    - name: Run integration test
+      run: |
+        # Get service IP
+        SERVICE_IP=$(kubectl get svc devops-microservice -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        echo "Service IP: $SERVICE_IP"
+        
+        # Wait for service
+        sleep 30
+        
+        # Test endpoint
+        curl -X POST \
+          -H "X-Parse-REST-API-Key: 2f5ae96c-b558-4c7b-a590-a501ae1c3f6c" \
+          -H "X-JWT-KWV: integration-test-$(date +%s)" \
+          -H "Content-Type: application/json" \
+          -d '{"message": "This is a test", "to": "Juan Perez", "from": "Rita Asturia", "timeToLifeSec": 45}' \
+          http://$SERVICE_IP/DevOps

@@ -1,0 +1,39 @@
+name: CI/CD Pipeline - DevOps Exercise
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+    - name: Install dependencies
+      run: cd src && pip install -r requirements.txt
+    - name: Run tests
+      run: cd src && pytest tests/ -v --cov=app --cov-report=xml
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+  
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == "push" && github.ref == "refs/heads/main"
+    steps:
+    - uses: actions/checkout@v3
+    - name: Build Docker
+      run: docker build -t devops-microservice .
+    - name: Test Docker
+      run: |
+        docker run -d -p 5000:5000 --name test-app devops-microservice
+        sleep 5
+        curl -X POST -H "X-Parse-REST-API-Key: 2f5ae96c-b558-4c7b-a590-a501ae1c3f6c" -H "X-JWT-KWV: test" -H "Content-Type: application/json" -d "{\"message\":\"test\",\"to\":\"test\",\"from\":\"test\",\"timeToLifeSec\":1}" http://localhost:5000/DevOps || true
+        docker stop test-app && docker rm test-app
